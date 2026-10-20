@@ -19,6 +19,7 @@ import { AnalysisCancelledError } from "../domain/analysisErrorCore.js";
 import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { readMipsElfMetadata } from "./MipsElfMetadata.js";
+import { inspectRiscvElfPie } from "./RiscvElfPie.js";
 import {
   resolveAppBundleExecutable,
   type ResolvedAppBundle,
@@ -551,11 +552,17 @@ const readExecutableMetadata = async (
     }
   }
   const parsed = parseExecutableHeader(bytes, hostArchitecture, fileSize);
-  if (
-    !parsed.ok ||
-    parsed.value.architecture !== "mips" ||
-    parsed.value.mips.elfClass !== 32
-  )
+  if (!parsed.ok) return parsed;
+  if (parsed.value.architecture === "riscv" && parsed.value.riscv.type === 3) {
+    const pieLoad = await inspectRiscvElfPie(handle, parsed.value.riscv, () =>
+      throwIfTargetResolutionCancelled(signal),
+    );
+    return ok({
+      ...parsed.value,
+      riscv: { ...parsed.value.riscv, pieLoad },
+    });
+  }
+  if (parsed.value.architecture !== "mips" || parsed.value.mips.elfClass !== 32)
     return parsed;
   const declarations = await readMipsElfMetadata(
     handle,

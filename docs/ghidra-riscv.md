@@ -18,20 +18,28 @@ The Ghidra lane admits little-endian ELF32 and ELF64 `ET_EXEC` images that
 declare `EF_RISCV_FLOAT_ABI_DOUBLE` in `e_flags`, with no `EF_RISCV_RVE`,
 `EF_RISCV_TSO`, or any bit outside `EF_RISCV_RVC | EF_RISCV_FLOAT_ABI`. These are
 header declarations, not proof that every instruction conforms to that ISA.
+It also admits a narrower ELF64 `ET_DYN` PIE lane when the file declares
+`DF_1_PIE`, has a verified executable entry in a `PT_LOAD` segment, and its
+complete `PT_DYNAMIC` relocation declarations use only the verified RISC-V
+`NONE`, `64`, `RELATIVE`, and `JUMP_SLOT` RELA types. A shared object without
+`DF_1_PIE`, ELF32 PIE, `REL`/packed `RELR`, text relocations, unsupported
+relocation types, or incomplete/ambiguous load ranges remain refused.
 
 Provider selection returns the specific unsupported constraint rather than
 guessing a compatible profile:
 
-| Declaration                                     | Outcome                                                                                  |
-| ----------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| Little-endian ELF64 `ET_EXEC`, double-float ABI | admitted, `RISCV:LE:64:default` + `gcc`                                                  |
-| Little-endian ELF32 `ET_EXEC`, double-float ABI | admitted, `RISCV:LE:32:default` + `gcc`                                                  |
-| Big-endian                                      | refused; Ghidra 12.1.4 ships no big-endian RISC-V language                               |
-| `ET_REL`, `ET_DYN`, other `e_type`              | refused with the declared value                                                          |
-| `EF_RISCV_RVE`                                  | refused; the embedded 16-register profile (x0–x15) needs its own processor specification |
-| `EF_RISCV_TSO`                                  | refused; the total-store-order memory model is unverified here                           |
-| Soft, single, or quad float ABI                 | refused; the pinned generic compiler specification models double-float                   |
-| Reserved or newer `e_flags` bits                | refused with the offending bits named                                                    |
+| Declaration                                      | Outcome                                                                                  |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------- |
+| Little-endian ELF64 `ET_EXEC`, double-float ABI  | admitted, `RISCV:LE:64:default` + `gcc`                                                  |
+| Little-endian ELF32 `ET_EXEC`, double-float ABI  | admitted, `RISCV:LE:32:default` + `gcc`                                                  |
+| Big-endian                                       | refused; Ghidra 12.1.4 ships no big-endian RISC-V language                               |
+| `ET_REL`, non-PIE `ET_DYN`, other `e_type`       | refused with the declared value                                                          |
+| ELF64 `ET_DYN` with verified `DF_1_PIE` and RELA | admitted as `elf64-dyn-le-double-float-generic-pie-v1`                                   |
+| ELF32 `ET_DYN` or missing/incomplete PIE facts   | refused; PIE load declarations are not inferred                                          |
+| `EF_RISCV_RVE`                                   | refused; the embedded 16-register profile (x0–x15) needs its own processor specification |
+| `EF_RISCV_TSO`                                   | refused; the total-store-order memory model is unverified here                           |
+| Soft, single, or quad float ABI                  | refused; the pinned generic compiler specification models double-float                   |
+| Reserved or newer `e_flags` bits                 | refused with the offending bits named                                                    |
 
 `e_type` is the only load-shape declaration this lane reads. A fixed-address
 `ET_EXEC` declaration does **not** establish static linkage: `PT_INTERP` and
@@ -58,15 +66,36 @@ with the `gcc` compiler specification per class, records
 pin without changing the requested override. An override that matches the pin is
 accepted and recorded as `configured-v1`.
 
+## PIE mapping and relocations
+
+The PIE inspector reads the ELF64 program-header table and bounded dynamic
+records directly from the source file. It checks non-overlapping `PT_LOAD`
+memory ranges, the file-backed `PT_DYNAMIC` mapping, the executable entry
+mapping, optional `PT_INTERP`, `DF_1_PIE`, and all declared `DT_RELA` and
+`DT_JMPREL` records. `DT_JMPREL` may be wholly contained in `DT_RELA`; it is
+counted once. Ambiguous table overlap, invalid destinations, text relocations,
+or relocation forms outside `R_RISCV_NONE`, `R_RISCV_64`, `R_RISCV_RELATIVE`,
+and `R_RISCV_JUMP_SLOT` keep the PIE lane unavailable.
+
+Ghidra's chosen image base and addresses are analysis coordinates, not the
+runtime ASLR base. The dynamic loader is not executed and dependency images are
+not loaded; symbol-bearing relocations can therefore remain externally
+unresolved. `inspect_native_load_image` retains Ghidra's relocation statuses
+and source/loaded bytes for the analyst to inspect. These facts establish a
+bounded static import, not runtime relocation success.
+
 ## Evidence
 
-The lane identity is `elf32-exec-le-double-float-generic-v1` or
-`elf64-exec-le-double-float-generic-v1`, and `riscv_elf` retains `elf_class`,
+The `ET_EXEC` lane identity is `elf32-exec-le-double-float-generic-v1` or
+`elf64-exec-le-double-float-generic-v1`; the PIE lane uses
+`elf64-dyn-le-double-float-generic-pie-v1`. `riscv_elf` retains `elf_class`,
 `byte_order`, `type`, and the raw `flags` alongside the read-only booleans
 `float_abi_double`, `rvc_declared`, `rve_declared`, and `tso_declared`. Those
 fields report declarations the header makes; none of them is evidence of the
 original compiler, of instruction conformance, or of a floating-point calling
 convention beyond the ABI the pinned language models.
+For PIE, `riscv_pie` additionally records the observed PIE flag, interpreter
+presence, executable-entry mapping, dependency count, and relocation coverage.
 
 ## Verification and limits
 
@@ -99,7 +128,8 @@ header-mutated soft-float and unsupported high-bit declarations, and checks
 unchanged source bytes and owned cleanup. Failures retain the diagnostic
 workspace; successful runs remove it and report the observed process lineage.
 
-Module tests cover admission and malformed headers. Call-graph completeness,
+Module tests cover admission, ELF64 PIE dynamic tables, relocation boundaries,
+and malformed headers. Call-graph completeness,
 string inventories, dynamic linkage, Andes or RVE/TSO images, and big-endian
 targets are **not** established by this lane. `.riscv.attributes` ISA extensions
 are not inspected; the generic language pin remains an analysis convention.

@@ -158,8 +158,8 @@ describe("bounded Ghidra RISC-V admission", () => {
 
   it.each([
     [{ byteOrder: "big" }, "little-endian"],
-    [{ type: 3 }, "fixed-address ET_EXEC only"],
-    [{ type: 1 }, "fixed-address ET_EXEC only"],
+    [{ type: 3 }, "complete PT_LOAD, PT_DYNAMIC and RELA inspection"],
+    [{ type: 1 }, "ET_EXEC and verified ELF64 PIE only"],
     [{ type: 0xffa0 }, "e_type 65440"],
     [{ flags: 0xc }, "EF_RISCV_RVE"],
     [{ flags: 0x14 }, "EF_RISCV_TSO"],
@@ -245,5 +245,94 @@ describe("bounded Ghidra RISC-V admission", () => {
     );
     const ida = new IdaProvider(configOf("/ida"), {});
     expect(ida.inspectTargetSupport(target()).status).toBe("unsupported");
+  });
+});
+
+describe("bounded Ghidra RISC-V PIE admission", () => {
+  it("admits only inspected ELF64 PIE with the verified relocation set", async () => {
+    const pie = target({
+      type: 3,
+      pieLoad: {
+        status: "complete",
+        pieFlag: true,
+        interpreter: true,
+        executableEntry: true,
+        neededLibraryCount: 5,
+        relocationCount: 24362,
+        relocationTypes: [2, 3, 5],
+        symbolRelocationCount: 245,
+      },
+    });
+    const provider = ghidra();
+    expect(provider.inspectTargetSupport(pie).status).toBe("supported");
+    expect(ghidraPinnedLanguage(pie)).toEqual({
+      languageId: "RISCV:LE:64:default",
+      compilerSpecId: "gcc",
+    });
+    const resolved = await provider.resolveAnalysisProfile(pie);
+    if (!resolved.ok || resolved.value.profile === null)
+      throw new Error("expected an admitted RISC-V PIE profile");
+    expect(resolved.value.profile.parameters).toMatchObject({
+      riscv_support_lane: "elf64-dyn-le-double-float-generic-pie-v1",
+      riscv_pie: {
+        pie_flag: true,
+        interpreter: true,
+        executable_entry: true,
+        needed_library_count: 5,
+        relocation_count: 24362,
+        relocation_types: [2, 3, 5],
+        symbol_relocation_count: 245,
+      },
+    });
+  });
+
+  it.each([
+    [{ pieFlag: false }, "does not declare DF_1_PIE"],
+    [{ relocationTypes: [2, 3, 5, 10] }, "outside the verified R_RISCV_NONE"],
+    [{ executableEntry: false }, "not verified in an executable PT_LOAD"],
+  ] satisfies [
+    Partial<
+      Extract<NonNullable<RiscvElfMetadata["pieLoad"]>, { status: "complete" }>
+    >,
+    string,
+  ][])("refuses an unverified RISC-V PIE declaration %j", (change, reason) => {
+    const value = target({
+      type: 3,
+      pieLoad: {
+        status: "complete",
+        pieFlag: true,
+        interpreter: false,
+        executableEntry: true,
+        neededLibraryCount: 0,
+        relocationCount: 0,
+        relocationTypes: [],
+        symbolRelocationCount: 0,
+        ...change,
+      },
+    });
+    expect(ghidra().inspectTargetSupport(value)).toMatchObject({
+      status: "unsupported",
+      reason: expect.stringContaining(reason),
+    });
+  });
+
+  it("explains that the PIE image base is not its runtime ASLR base", () => {
+    expect(
+      ghidraRiscvLimitations(
+        target({
+          type: 3,
+          pieLoad: {
+            status: "complete",
+            pieFlag: true,
+            interpreter: true,
+            executableEntry: true,
+            neededLibraryCount: 1,
+            relocationCount: 1,
+            relocationTypes: [3],
+            symbolRelocationCount: 0,
+          },
+        }),
+      ).join(" "),
+    ).toContain("not the runtime ASLR base");
   });
 });

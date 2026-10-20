@@ -112,7 +112,25 @@ export interface MipsGnuAttributes {
  * ELF class and flags retain the width and ABI declarations used by this lane.
  * ISA extensions in `.riscv.attributes` are not inspected by this header parser.
  */
-export type RiscvElfMetadata = ElfFamilyMetadata;
+export interface RiscvPieLoadMetadata {
+  readonly status: "complete";
+  readonly pieFlag: boolean;
+  readonly interpreter: boolean;
+  readonly executableEntry: boolean;
+  readonly neededLibraryCount: number;
+  readonly relocationCount: number;
+  readonly relocationTypes: readonly number[];
+  readonly symbolRelocationCount: number;
+}
+
+export type RiscvPieLoadInspection =
+  | RiscvPieLoadMetadata
+  | { readonly status: "unavailable"; readonly reason: string };
+
+export interface RiscvElfMetadata extends ElfFamilyMetadata {
+  /** Complete ELF64 ET_DYN load and dynamic RELA declarations, or why unavailable. */
+  readonly pieLoad?: RiscvPieLoadInspection;
+}
 
 /** Raw PowerPC declarations; family identity does not select a processor variant. */
 export type PowerPcElfMetadata = ElfFamilyMetadata;

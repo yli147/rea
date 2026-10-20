@@ -17,6 +17,7 @@ const EF_RISCV_TSO = 0x0010;
 const ET_REL = 1;
 const ET_EXEC = 2;
 const ET_DYN = 3;
+const RISCV_PIE_RELOCATION_TYPES = new Set([0, 2, 3, 5]);
 
 /**
  * Bits this lane reads. Anything else in `e_flags` — reserved today or defined by
@@ -57,14 +58,25 @@ export const ghidraRiscvUnsupportedReason = (
     return "EF_RISCV_RVE declares the embedded 15-register ABI, which needs its own processor specification and compiler verification.";
   if ((metadata.flags & EF_RISCV_TSO) !== 0)
     return "EF_RISCV_TSO declares the total-store-order memory model; this lane verifies the baseline model only.";
-  if (metadata.type !== ET_EXEC)
-    return `This Ghidra RISC-V lane supports fixed-address ET_EXEC only; ${
-      metadata.type === ET_REL
-        ? "relocatable"
-        : metadata.type === ET_DYN
-          ? "shared and position-independent"
-          : `e_type ${metadata.type}`
-    } images need separate load verification. ET_EXEC alone does not establish static linkage, which this lane does not inspect.`;
+  if (metadata.type !== ET_EXEC && metadata.type !== ET_DYN)
+    return `This Ghidra RISC-V lane supports ET_EXEC and verified ELF64 PIE only; ${
+      metadata.type === ET_REL ? "relocatable" : `e_type ${metadata.type}`
+    } images need separate load verification.`;
+  if (metadata.type === ET_DYN) {
+    if (metadata.elfClass !== 64)
+      return "This Ghidra RISC-V PIE lane supports ELF64 only; ELF32 PIE needs separate load verification.";
+    const load = metadata.pieLoad;
+    if (load === undefined || load.status !== "complete")
+      return `RISC-V ET_DYN requires complete PT_LOAD, PT_DYNAMIC and RELA inspection. ${load?.reason ?? "The source declarations have not been inspected."}`;
+    if (!load.pieFlag)
+      return "RISC-V ET_DYN does not declare DF_1_PIE; shared objects are outside this executable PIE lane.";
+    if (!load.executableEntry)
+      return "RISC-V PIE entry point is not verified in an executable PT_LOAD range.";
+    if (
+      load.relocationTypes.some((type) => !RISCV_PIE_RELOCATION_TYPES.has(type))
+    )
+      return "RISC-V PIE dynamic relocations include types outside the verified R_RISCV_NONE, R_RISCV_64, R_RISCV_RELATIVE and R_RISCV_JUMP_SLOT set.";
+  }
   const abi = metadata.flags & EF_RISCV_FLOAT_ABI;
   if (abi !== EF_RISCV_FLOAT_ABI_DOUBLE)
     return `This Ghidra RISC-V lane requires the EF_RISCV_FLOAT_ABI_DOUBLE declaration (${riscvUnsupportedFloatAbi(
@@ -110,9 +122,26 @@ export const ghidraRiscvProfileParameters = (
           tso_declared: (target.riscv.flags & EF_RISCV_TSO) !== 0,
         },
         riscv_support_lane:
-          target.riscv.elfClass === 32
-            ? "elf32-exec-le-double-float-generic-v1"
-            : "elf64-exec-le-double-float-generic-v1",
+          target.riscv.type === ET_DYN
+            ? "elf64-dyn-le-double-float-generic-pie-v1"
+            : target.riscv.elfClass === 32
+              ? "elf32-exec-le-double-float-generic-v1"
+              : "elf64-exec-le-double-float-generic-v1",
+        ...(target.riscv.type === ET_DYN &&
+        target.riscv.pieLoad?.status === "complete"
+          ? {
+              riscv_pie: {
+                pie_flag: target.riscv.pieLoad.pieFlag,
+                interpreter: target.riscv.pieLoad.interpreter,
+                executable_entry: target.riscv.pieLoad.executableEntry,
+                needed_library_count: target.riscv.pieLoad.neededLibraryCount,
+                relocation_count: target.riscv.pieLoad.relocationCount,
+                relocation_types: [...target.riscv.pieLoad.relocationTypes],
+                symbol_relocation_count:
+                  target.riscv.pieLoad.symbolRelocationCount,
+              },
+            }
+          : {}),
       }
     : {};
 
@@ -124,6 +153,13 @@ export const ghidraRiscvLimitations = (
     ? [
         `RISC-V ELF: REA pins Ghidra's generic \`RISCV:LE:${target.riscv.elfClass}:default\` language with the \`gcc\` compiler specification instead of accepting the loader's header-based choice, which selects \`RISCV:LE:32:AndeStar_v5\` for ordinary RV32 images on Ghidra 12.1.4.`,
         "The pinned generic language models the double-float ABI declared by `e_flags`; the declaration is recorded as an ELF fact and is not evidence of the original compiler or of verified instruction semantics.",
-        "Admission reads `e_type` only: a fixed-address ET_EXEC declaration does not establish static linkage, and program headers (`PT_INTERP`, dynamic dependencies) are not inspected by this lane.",
+        ...(target.riscv.type === ET_DYN
+          ? [
+              "RISC-V PIE: Ghidra's image base and returned addresses are analysis coordinates, not the runtime ASLR base. REA verifies the ELF load ranges and the declared dynamic RELA records; it does not execute the dynamic loader.",
+              "PIE dependencies are not loaded. Symbol-bearing relocations may depend on external images; inspect_native_load_image retains Ghidra's relocation status, and unresolved external bindings remain unknown.",
+            ]
+          : [
+              "Admission reads `e_type` only: a fixed-address ET_EXEC declaration does not establish static linkage, and program headers (`PT_INTERP`, dynamic dependencies) are not inspected by this lane.",
+            ]),
       ]
     : [];

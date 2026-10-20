@@ -23,7 +23,10 @@ import { parseAnalysisSnapshot } from "../dist/domain/analysisSnapshot.js";
 import { parseEvidence } from "../dist/domain/evidence.js";
 import { functionDossierSchema } from "../dist/domain/hopperValues.js";
 import { inspectVerifierGhidraInstallation } from "./lib/ghidra-installation-inspection.mjs";
-import { buildRiscvFixture } from "../tests/conformance/ghidra/riscv-fixture.mjs";
+import {
+  buildRiscvFixture,
+  buildRiscvPieFixture,
+} from "../tests/conformance/ghidra/riscv-fixture.mjs";
 import {
   mcpTextValue,
   requireMcpOperationResult,
@@ -342,6 +345,119 @@ try {
       original_unchanged: true,
     });
   }
+  const pieFixture = await buildRiscvPieFixture(workspace);
+  const pieTarget = await parseBinaryTarget(pieFixture.path);
+  if (!pieTarget.ok) throw pieTarget.error;
+  assert.equal(pieTarget.value.architecture, "riscv");
+  assert.equal(pieTarget.value.sha256, pieFixture.sha256);
+  assert.deepEqual(pieTarget.value.riscv, {
+    elfClass: 64,
+    byteOrder: "little",
+    type: 3,
+    flags: 5,
+    pieLoad: {
+      status: "complete",
+      pieFlag: true,
+      interpreter: true,
+      executableEntry: true,
+      neededLibraryCount: 0,
+      relocationCount: 1,
+      relocationTypes: [3],
+      symbolRelocationCount: 0,
+    },
+  });
+  const callPie = async (name, args = {}) => {
+    const reply = await client.callTool(
+      { name, arguments: args },
+      { timeout: 240000 },
+    );
+    const result = requireMcpOperationResult(reply, name);
+    const textual = JSON.parse(mcpTextValue(reply));
+    assert.deepEqual(reply.structuredContent, textual);
+    const validate = validators.get(name);
+    assert.ok(validate, `${name} missing from advertised catalog`);
+    assert.ok(validate(textual), `${name}: ${JSON.stringify(validate.errors)}`);
+    const evidence = ["open_binary", "close_binary", "binary_session"].includes(
+      name,
+    )
+      ? undefined
+      : parseEvidence(textual);
+    return { result, evidence };
+  };
+  const pieOpened = await callPie("open_binary", {
+    path: pieFixture.path,
+    provider_id: "ghidra",
+  });
+  assert.equal(pieOpened.result.architecture, "riscv");
+  assert.equal(pieOpened.result.sha256, pieFixture.sha256);
+  const pieImage = await callPie("inspect_native_load_image");
+  assert.equal(pieImage.result.observations.language_id, "RISCV:LE:64:default");
+  assert.equal(pieImage.result.observations.compiler_spec_id, "gcc");
+  assert.equal(pieImage.result.observations.source_files.length, 1);
+  assert.equal(
+    pieImage.result.observations.source_files[0].original_sha256,
+    pieFixture.sha256,
+  );
+  assert.match(
+    pieImage.result.observations.source_files[0].modified_sha256,
+    /^[a-f\d]{64}$/u,
+  );
+  assert.equal(pieImage.result.observations.relocations.length, 1);
+  assert.equal(pieImage.result.observations.relocations[0].type, 3);
+  assert.equal(pieImage.result.observations.relocations[0].status, "APPLIED");
+  assert.ok(pieImage.evidence);
+  assert.equal(pieImage.evidence.provider.id, "ghidra");
+  assert.equal(
+    pieImage.evidence.provider.version,
+    installation.providerVersion,
+  );
+  assert.equal(
+    pieImage.evidence.analysis_profile.parameters.language_id,
+    "RISCV:LE:64:default",
+  );
+  assert.equal(
+    pieImage.evidence.analysis_profile.parameters.riscv_support_lane,
+    "elf64-dyn-le-double-float-generic-pie-v1",
+  );
+  assert.deepEqual(pieImage.evidence.analysis_profile.parameters.riscv_pie, {
+    pie_flag: true,
+    interpreter: true,
+    executable_entry: true,
+    needed_library_count: 0,
+    relocation_count: 1,
+    relocation_types: [3],
+    symbol_relocation_count: 0,
+  });
+  const pieProcedures = await callPie("list_procedures");
+  const pieEntry = pieProcedures.result.find(
+    (procedure) => procedure.value === "rea_riscv_pie_entry",
+  );
+  assert.ok(pieEntry, "PIE entry procedure missing from Ghidra inventory");
+  assert.equal(
+    BigInt(pieEntry.address),
+    BigInt(pieImage.result.observations.image_base) +
+      BigInt(pieFixture.symbols.rea_riscv_pie_entry),
+  );
+  const pieInstruction = await callPie("inspect_native_instruction", {
+    address: pieEntry.address,
+  });
+  assert.equal(pieInstruction.result.status, "decoded");
+  assert.equal(pieInstruction.result.architecture, "RISCV:LE:64:default");
+  await callPie("close_binary");
+  assert.equal(
+    createHash("sha256")
+      .update(await readFile(pieFixture.path))
+      .digest("hex"),
+    pieFixture.sha256,
+  );
+  reports.push({
+    ...pieFixture,
+    language: "RISCV:LE:64:default",
+    support_lane: "elf64-dyn-le-double-float-generic-pie-v1",
+    relocations: pieTarget.value.riscv.pieLoad.relocationCount,
+    stdio_mcp: true,
+    original_unchanged: true,
+  });
 } catch (cause) {
   failure = cause;
 }
